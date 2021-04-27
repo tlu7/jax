@@ -442,7 +442,7 @@ def _cpp_jit(
         all(xla.type_is_device_array(x) for x in out_flat))
     ### If we can use the fastpath, we return required info to the caller.
     if use_fastpath:
-      xla_executable, _, result_handlers = execute.args
+      xla_executable, _, result_handlers, kept_var_idx = execute.args
       sticky_device = None
       avals = []
       lazy_exprs = [None] * len(result_handlers)
@@ -450,7 +450,11 @@ def _cpp_jit(
         aval, sticky_device = result_handler.args
         avals.append(aval)
       assert len(avals) == len(out_flat)
-      fastpath_data = (xla_executable, out_pytree_def, sticky_device, avals, lazy_exprs)
+      if lib._xla_extension_version < 18:
+        fastpath_data = (xla_executable, out_pytree_def, sticky_device, avals, lazy_exprs)
+      else:
+        # Pruning is only supported in jaxlib version >= 18.
+        fastpath_data = (xla_executable, out_pytree_def, sticky_device, avals, lazy_exprs, list(kept_var_idx))
     else:
       fastpath_data = None
 
