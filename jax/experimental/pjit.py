@@ -18,6 +18,7 @@ from typing import Callable, Sequence, Tuple, Union
 from warnings import warn
 import itertools as it
 
+from .maps import mesh
 from . import maps
 from . import PartitionSpec
 from .. import core
@@ -45,6 +46,99 @@ def pjit(fun: Callable,
          out_axis_resources,
          static_argnums: Union[int, Sequence[int]] = (),
          donate_argnums: Union[int, Sequence[int]] = ()):
+  """Makes ``fun`` compiled and automatically partitioned using XLA.
+
+  The returned function has semantics equivalent to those of ``fun``, but
+  is compiled to a single multi-device XLA computation. The partitioning
+  over multiple devices happens automatically, based on propagation of
+  input partitioning specified in ``in_axis_resources`` and output partitioning
+  specified in ``out_axis_resources``. The resources specified in those two
+  arguments can only refer to mesh axes, as defined by the
+  :py:func:`jax.experimental.maps.mesh` context manager. Note that the mesh
+  definition at ``pjit`` application time is ignored, and the returned function
+  will use the mesh definition available at each call site.
+
+  Inputs to ``pjit`` do not have to be partitioned accross multiple devices.
+  The implementation ensures to do the sharding automatically in that case.
+  However, for best performance it is best to ensure that the arguments
+  are correctly sharded (e.g. they are output of another ``pjit`` with
+  ``out_axis_resources`` matching the desired ``in_axis_resources``).
+
+  .. note::
+    Standard caveats apply to multi-process JAX invocations. ``pjit`` can operate
+    over meshes spanning multiple processes, but in that case the input dimensions
+    partitioned over multi-process mesh axes are expected to be of size matching
+    the size of the local mesh axis. The invocation of the ``pjit``ed function
+    will be then equivalent to running a computation with a global view of
+    the input array. In particular all elements coming from all processes are
+    visible to the computation. Outputs in each process will also correspond to
+    the slices of the global value that correspond to the data partitioned onto
+    the local devices.
+
+  Args:
+    fun: Function to be compiled. Should be a pure function, as side-effects may
+      only be executed once. Its arguments and return value should be arrays,
+      scalars, or (nested) standard Python containers (tuple/list/dict) thereof.
+      Positional arguments indicated by ``static_argnums`` can be anything at
+      all, provided they are hashable and have an equality operation defined.
+      Static arguments are included as part of a compilation cache key, which is
+      why hash and equality operators must be defined.
+    in_axis_resources: Pytree of structure matching that of arguments to ``fun``,
+      with all actual arguments replaced by resource assignment specifications.
+      It is also valid to specify a pytree prefix (e.g. one value in place of a
+      whole subtree), in which case the leaves get broadcast to all values in
+      that subtree.
+
+      The valid resource assignment specifications are:
+        - :py:obj:`None`, in which case the value will be replicated on all devices
+        - :py:class:`PartitionSpec`, a tuple of length at most equal to the rank
+          of the partitioned value. Each element can be a :py:obj:`None`, a mesh
+          axis or a tuple of mesh axes, and specifies the set of resources assigned
+          to partition the value's dimension matching its position in the spec.
+
+      The size of every dimension has to be a multiple of the total number of
+      resources assigned to it.
+    out_axis_resources: Like ``in_axis_resources``, but specifies resource
+      assignment for function outputs.
+    static_argnums: An optional int or collection of ints that specify which
+      positional arguments to treat as static (compile-time constant).
+      Operations that only depend on static arguments will be constant-folded in
+      Python (during tracing), and so the corresponding argument values can be
+      any Python object.
+
+      Static arguments should be hashable, meaning both ``__hash__`` and
+      ``__eq__`` are implemented, and immutable. Calling the jitted function
+      with different values for these constants will trigger recompilation.
+      Arguments that are not arrays or containers thereof must be marked as
+      static.
+
+      If ``static_argnums`` is not provided, no arguments are treated as static.
+    donate_argnums: Specify which arguments are "donated" to the computation.
+      It is safe to donate arguments if you no longer need them once the
+      computation has finished. In some cases XLA can make use of donated
+      buffers to reduce the amount of memory needed to perform a computation,
+      for example recycling one of your input buffers to store a result. You
+      should not reuse buffers that you donate to a computation, JAX will raise
+      an error if you try to.
+
+  Returns:
+    A wrapped version of ``fun``, set up for just-in-time compilation and
+    automatic partitioned by the mesh available at each call site.
+
+  For example, a convolution operator can be automatically partitioned over
+  an arbitrary set of devices by a single ```pjit`` application:
+
+  >>> import jax
+  >>> import jax.numpy as jnp
+  >>> from jax.experimental.pjit import PartitionSpec, pjit, mesh
+  >>>
+  >>> x = jnp.arange(8, dtype=jnp.float32)
+  >>> f = pjit(lambda x: jax.numpy.convolve(x, jnp.asarray([0.5, 1.0, 0.5]), 'same'),
+  ...         in_axis_resources=None, out_axis_resources=PartitionSpec('devices'))
+  >>> with mesh(jax.devices(), ('devices',)):
+  ...   print(f(x))  # doctest: +SKIP
+  [ 0.5  2.   4.   6.   8.  10.  12.  10. ]
+  """
   warn("pjit is an experimental feature and probably has bugs!")
   _check_callable(fun)
 
